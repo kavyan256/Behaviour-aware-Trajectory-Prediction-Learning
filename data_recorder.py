@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# acreate a vision model, that as soon as it detects a obstacle, it starts a live feed
-# the live feed is inserted into a llm which then describes the sceen, model predicts the next move() ex slow down or speed up) if correct llm says good work if incorrect, llm asks user reason for his decision and then updates that to its memory and trains the model
+# Enhanced CARLA Behavior Cloning Data Recorder with VehicleDetectionTracker features
+# Includes ByteTrack vehicle tracking, speed calculation, direction mapping, and vehicle classification
 
 """
-CARLA Behavior Cloning Data Recorder - Phase 2
+CARLA Behavior Cloning Data Recorder - Enhanced with VehicleDetectionTracker Features
 Phase 1: Connection, vehicle spawn, and 3rd person spectator view
 Phase 2: Keyboard control for the vehicle
+Phase 3: Enhanced tracking with speed, direction, and classification
 """
 
 import carla
@@ -17,6 +18,9 @@ import cv2
 import numpy as np
 import threading
 import queue
+import json
+import os
+from datetime import datetime
 from computer_vision import ComputerVisionProcessor
 
 class CARLADataRecorder:
@@ -85,12 +89,46 @@ class CARLADataRecorder:
         # Initialize Computer Vision Processor
         self.cv_processor = ComputerVisionProcessor()
         
-        print(f"📹 Camera Configuration:")
+        # === Enhanced VehicleDetectionTracker Features ===
+        # Data recording and analytics
+        self.recording_enabled = True
+        self.data_output_dir = "carla_recordings"
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.detection_log = []
+        self.frame_counter = 0
+        
+        # Enhanced tracking options
+        self.use_enhanced_tracking = True
+        self.save_vehicle_frames = True
+        self.save_detection_data = True
+        self.enable_analytics_display = True
+        
+        # Performance monitoring
+        self.detection_performance = {
+            "total_detections": 0,
+            "successful_tracks": 0,
+            "avg_processing_time": 0.0,
+            "frames_processed": 0
+        }
+        
+        # Create output directory
+        if self.recording_enabled:
+            os.makedirs(self.data_output_dir, exist_ok=True)
+            session_dir = os.path.join(self.data_output_dir, f"session_{self.session_id}")
+            os.makedirs(session_dir, exist_ok=True)
+            self.session_dir = session_dir
+            print(f"� Recording session: {session_dir}")
+        
+        print(f"�📹 Camera Configuration:")
         print(f"   Front Camera: {'ENABLED' if self.front_camera_enabled else 'DISABLED'}")
         print(f"   Left Camera:  {'ENABLED' if self.left_camera_enabled else 'DISABLED'}")
         print(f"   Right Camera: {'ENABLED' if self.right_camera_enabled else 'DISABLED'}")
         print(f"   Top Camera:   {'ENABLED' if self.top_camera_enabled else 'DISABLED'}")
         print(f"   Rear Camera:  {'ENABLED' if self.rear_camera_enabled else 'DISABLED'}")
+        print(f"🔧 Enhanced Features:")
+        print(f"   ByteTrack Tracking: {'ENABLED' if self.use_enhanced_tracking else 'DISABLED'}")
+        print(f"   Vehicle Classification: {'ENABLED' if self.cv_processor.enable_color_classification else 'DISABLED'}")
+        print(f"   Data Recording: {'ENABLED' if self.recording_enabled else 'DISABLED'}")
         print("=" * 50)
     
     def connect_to_carla(self):
@@ -159,6 +197,18 @@ class CARLADataRecorder:
             # Enable physics for the vehicle
             self.vehicle.set_simulate_physics(True)
             
+            # === Attach IMU sensor ===
+            try:
+                blueprint_library = self.world.get_blueprint_library()
+                imu_bp = blueprint_library.find('sensor.other.imu')
+                imu_bp.set_attribute('sensor_tick', '0.05')  # 20Hz
+                imu_transform = carla.Transform(carla.Location(x=0, y=0, z=2.0))
+                self.imu_sensor = self.world.spawn_actor(imu_bp, imu_transform, attach_to=self.vehicle)
+                self.imu_sensor.listen(self._on_imu)
+                print("✅ IMU sensor attached to vehicle.")
+            except Exception as e:
+                print(f"⚠️ Failed to attach IMU sensor: {e}")
+            
             # Wait a moment for the vehicle to settle
             time.sleep(0.5)
             
@@ -168,6 +218,10 @@ class CARLADataRecorder:
             print(f"❌ Failed to spawn vehicle: {e}")
             return False
     
+    def _on_imu(self, imu_data):
+        """Callback for IMU sensor data."""
+        self.imu_data = imu_data
+
     def setup_spectator_view(self):
         """Set up 3rd person spectator view behind the vehicle."""
         try:
@@ -547,7 +601,7 @@ class CARLADataRecorder:
             self.right_image_queue.put((image.timestamp, processed_image))
     
     def _on_top_image(self, image):
-        """Process top camera image."""
+        """Process top camera image with enhanced VehicleDetectionTracker features."""
         if not self.top_camera_enabled:
             return
             
@@ -557,12 +611,51 @@ class CARLADataRecorder:
         
         cv_image = cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
         
-        # Process with computer vision - Top view gets advanced processing
-        processed_image = self.cv_processor.process_top_view(cv_image)
+        ego_velocity = None
+        ego_angular = None
+        if self.imu_data is not None:
+            try:
+                v = self.vehicle.get_velocity()
+                ego_velocity = (v.x, v.y, v.z)
+            except Exception:
+                ego_velocity = None
+            try:
+                av = self.imu_data.gyro
+                ego_angular = (av.x, av.y, av.z)
+            except Exception:
+                ego_angular = None
+        
+        # Enhanced processing with ByteTrack features
+        if self.use_enhanced_tracking:
+            # Use ByteTrack detection method
+            frame_timestamp = datetime.now()
+            detection_result = self.cv_processor.detect_vehicles_with_bytetrack(cv_image, frame_timestamp)
+            
+            # Log detection data
+            if self.save_detection_data and detection_result.get("detected_vehicles"):
+                self._log_detection_data(detection_result, "top_camera")
+            
+            # Get processed frame from detection result
+            if detection_result.get("annotated_frame_base64"):
+                processed_image = self.cv_processor._decode_image_base64(detection_result["annotated_frame_base64"])
+                if processed_image is None:
+                    processed_image = cv_image
+            else:
+                processed_image = cv_image
+                
+            # Update performance metrics
+            self.detection_performance["frames_processed"] += 1
+            self.detection_performance["total_detections"] += detection_result.get("number_of_vehicles_detected", 0)
+            
+        else:
+            # Fallback to original processing
+            processed_image = self.cv_processor.process_top_view(cv_image, ego_velocity=ego_velocity, ego_angular=ego_angular)
+        
         self.current_top_image = processed_image
+        self.frame_counter += 1
         
         if not self.top_image_queue.full():
-            self.top_image_queue.put((image.timestamp, processed_image))
+            self.top_image_queue.put(processed_image)
     
     def _on_rear_image(self, image):
         """Process rear camera image."""
@@ -582,6 +675,87 @@ class CARLADataRecorder:
         if not self.rear_image_queue.full():
             self.rear_image_queue.put((image.timestamp, processed_image))
     
+    def _log_detection_data(self, detection_result, camera_source):
+        """Log detection data for analysis and training."""
+        if not self.recording_enabled:
+            return
+            
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "frame_counter": self.frame_counter,
+            "camera_source": camera_source,
+            "vehicle_count": detection_result.get("number_of_vehicles_detected", 0),
+            "vehicles": []
+        }
+        
+        # Add vehicle data
+        for vehicle in detection_result.get("detected_vehicles", []):
+            vehicle_entry = {
+                "vehicle_id": vehicle.get("vehicle_id"),
+                "vehicle_type": vehicle.get("vehicle_type"),
+                "confidence": vehicle.get("detection_confidence"),
+                "coordinates": vehicle.get("vehicle_coordinates"),
+                "speed_info": vehicle.get("speed_info"),
+                "color_info": vehicle.get("color_info"),
+                "model_info": vehicle.get("model_info")
+            }
+            log_entry["vehicles"].append(vehicle_entry)
+        
+        # Add to detection log
+        self.detection_log.append(log_entry)
+        
+        # Save vehicle frames if enabled
+        if self.save_vehicle_frames:
+            self._save_vehicle_frames(detection_result)
+        
+        # Periodically save log to file
+        if len(self.detection_log) % 50 == 0:
+            self._save_detection_log()
+    
+    def _save_vehicle_frames(self, detection_result):
+        """Save individual vehicle frames for training data."""
+        vehicle_frames_dir = os.path.join(self.session_dir, "vehicle_frames")
+        os.makedirs(vehicle_frames_dir, exist_ok=True)
+        
+        for vehicle in detection_result.get("detected_vehicles", []):
+            if vehicle.get("vehicle_frame_base64"):
+                vehicle_id = vehicle.get("vehicle_id")
+                vehicle_type = vehicle.get("vehicle_type", "unknown")
+                timestamp = self.frame_counter
+                
+                # Decode and save vehicle frame
+                vehicle_frame = self.cv_processor._decode_image_base64(vehicle["vehicle_frame_base64"])
+                if vehicle_frame is not None:
+                    filename = f"vehicle_{vehicle_id}_{vehicle_type}_{timestamp}.jpg"
+                    filepath = os.path.join(vehicle_frames_dir, filename)
+                    cv2.imwrite(filepath, vehicle_frame)
+    
+    def _save_detection_log(self):
+        """Save detection log to JSON file."""
+        if not self.detection_log:
+            return
+            
+        log_file = os.path.join(self.session_dir, "detection_log.json")
+        try:
+            with open(log_file, 'w') as f:
+                json.dump(self.detection_log, f, indent=2)
+        except Exception as e:
+            print(f"⚠️ Failed to save detection log: {e}")
+    
+    def get_session_analytics(self):
+        """Get comprehensive analytics for the current session."""
+        analytics = self.cv_processor.get_vehicle_analytics()
+        
+        # Add session-specific data
+        analytics.update({
+            "session_id": self.session_id,
+            "frame_counter": self.frame_counter,
+            "detection_performance": self.detection_performance,
+            "total_logged_detections": len(self.detection_log)
+        })
+        
+        return analytics
+
     def display_vision_system(self):
         """Display all enabled camera feeds."""
         # Display front camera if enabled and image exists
@@ -605,12 +779,52 @@ class CARLADataRecorder:
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
             cv2.imshow("Right Camera", right_display)
         
-        # Display top camera if enabled and image exists
+        # Enhanced top camera display with analytics
         if self.top_camera_enabled and self.current_top_image is not None:
             top_display = self.current_top_image.copy()
-            cv2.putText(top_display, "Top Camera (Bird's Eye)", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
-            cv2.imshow("Top Camera", top_display)
+            
+            # Add title
+            cv2.putText(top_display, "Top Camera - Enhanced Tracking", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+            
+            # Add analytics overlay if enabled
+            if self.enable_analytics_display:
+                y_offset = 60
+                analytics = self.get_session_analytics()
+                
+                # Frame counter and session info
+                cv2.putText(top_display, f"Frame: {self.frame_counter}", (10, y_offset), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                y_offset += 25
+                
+                # Vehicle tracking stats
+                cv2.putText(top_display, f"Unique Vehicles: {analytics.get('total_unique_vehicles', 0)}", 
+                           (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                y_offset += 25
+                
+                cv2.putText(top_display, f"Active Tracks: {analytics.get('active_tracks', 0)}", 
+                           (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                y_offset += 25
+                
+                # Performance stats
+                total_detections = self.detection_performance.get("total_detections", 0)
+                cv2.putText(top_display, f"Total Detections: {total_detections}", 
+                           (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                y_offset += 25
+                
+                # Speed stats if available
+                if "speed_stats" in analytics:
+                    avg_speed = analytics["speed_stats"].get("avg_speed_kph", 0)
+                    cv2.putText(top_display, f"Avg Speed: {avg_speed:.1f} km/h", 
+                               (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    y_offset += 25
+                
+                # Session recording status
+                if self.recording_enabled:
+                    cv2.putText(top_display, "RECORDING", (top_display.shape[1] - 150, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            
+            cv2.imshow("Top Camera - Enhanced", top_display)
         
         # Display rear camera if enabled and image exists
         if self.rear_camera_enabled and self.current_rear_image is not None:
@@ -727,6 +941,16 @@ class CARLADataRecorder:
             "9 - Reduce Sensitivity",
             "0 - Increase Sensitivity",
             "",
+            "Enhanced Features:",
+            "T - ByteTrack Tracking",
+            "C - Color Classification",
+            "M - Model Classification",
+            "L - Analytics Overlay",
+            "F - Frame Saving",
+            "B - Brightness",
+            "Ctrl+A - Analytics",
+            "Ctrl+S - Save Data",
+            "",
             "ESC - Exit"
         ]
         
@@ -797,6 +1021,15 @@ class CARLADataRecorder:
         print("   8 - Show current detection settings")
         print("   9 - Apply preset: Reduce sensitivity (larger zones)")
         print("   0 - Apply preset: Increase sensitivity (smaller zones)")
+        print("\n🚀 Enhanced Tracking Controls:")
+        print("   T - Toggle ByteTrack tracking")
+        print("   C - Toggle color classification")
+        print("   M - Toggle model classification")
+        print("   L - Toggle analytics overlay")
+        print("   F - Toggle vehicle frame saving")
+        print("   B - Cycle brightness enhancement")
+        print("   Ctrl+A - Show detailed analytics")
+        print("   Ctrl+S - Save session data")
         print("   ESC - Exit")
         print("\n� Camera System:")
         
@@ -898,6 +1131,50 @@ class CARLADataRecorder:
                                 medium_distance=150        # Smaller medium zone
                             )
                             print("🔧 Applied preset: Increased sensitivity (smaller zones)")
+                        # === NEW: Enhanced VehicleDetectionTracker Controls ===
+                        elif event.key == pygame.K_t:
+                            # Toggle ByteTrack tracking
+                            self.use_enhanced_tracking = not self.use_enhanced_tracking
+                            print(f"🎯 Enhanced Tracking (ByteTrack): {'ON' if self.use_enhanced_tracking else 'OFF'}")
+                        elif event.key == pygame.K_c:
+                            # Toggle vehicle classification
+                            if hasattr(self.cv_processor, 'enable_color_classification'):
+                                self.cv_processor.enable_color_classification = not self.cv_processor.enable_color_classification
+                                print(f"🎨 Color Classification: {'ON' if self.cv_processor.enable_color_classification else 'OFF'}")
+                        elif event.key == pygame.K_m:
+                            # Toggle model classification
+                            if hasattr(self.cv_processor, 'enable_model_classification'):
+                                self.cv_processor.enable_model_classification = not self.cv_processor.enable_model_classification
+                                print(f"🚗 Model Classification: {'ON' if self.cv_processor.enable_model_classification else 'OFF'}")
+                        elif event.key == pygame.K_a and event.mod & pygame.KMOD_CTRL:
+                            # Show analytics (Ctrl+A)
+                            analytics = self.get_session_analytics()
+                            print("📊 Session Analytics:")
+                            print(f"   - Unique Vehicles: {analytics.get('total_unique_vehicles', 0)}")
+                            print(f"   - Active Tracks: {analytics.get('active_tracks', 0)}")
+                            print(f"   - Total Detections: {analytics.get('total_logged_detections', 0)}")
+                            print(f"   - Frames Processed: {analytics.get('frame_counter', 0)}")
+                            if "speed_stats" in analytics:
+                                print(f"   - Average Speed: {analytics['speed_stats'].get('avg_speed_kph', 0):.1f} km/h")
+                        elif event.key == pygame.K_s and event.mod & pygame.KMOD_CTRL:
+                            # Save current session data (Ctrl+S)
+                            self._save_detection_log()
+                            print("💾 Session data saved manually")
+                        elif event.key == pygame.K_l:
+                            # Toggle analytics display overlay
+                            self.enable_analytics_display = not self.enable_analytics_display
+                            print(f"📊 Analytics Overlay: {'ON' if self.enable_analytics_display else 'OFF'}")
+                        elif event.key == pygame.K_f:
+                            # Toggle frame saving
+                            self.save_vehicle_frames = not self.save_vehicle_frames
+                            print(f"🖼️ Vehicle Frame Saving: {'ON' if self.save_vehicle_frames else 'OFF'}")
+                        elif event.key == pygame.K_b:
+                            # Adjust brightness enhancement
+                            current_brightness = self.cv_processor.brightness_factor
+                            new_brightness = current_brightness + 0.2 if current_brightness < 2.0 else 1.0
+                            self.cv_processor.brightness_factor = new_brightness
+                            print(f"🔆 Brightness Factor: {new_brightness:.1f}")
+                        # === END: Enhanced Controls ===
                 
                 # Process continuous keyboard input
                 self.process_keyboard_input()
@@ -976,8 +1253,36 @@ class CARLADataRecorder:
         return True
     
     def cleanup(self):
-        """Clean up resources."""
+        """Clean up resources and save final data."""
         print("\n🧹 Cleaning up...")
+        
+        # === Enhanced: Save final session data ===
+        if self.recording_enabled:
+            print("💾 Saving final session data...")
+            
+            # Save final detection log
+            self._save_detection_log()
+            
+            # Save session analytics
+            analytics = self.get_session_analytics()
+            analytics_file = os.path.join(self.session_dir, "session_analytics.json")
+            try:
+                with open(analytics_file, 'w') as f:
+                    json.dump(analytics, f, indent=2)
+                print(f"   📊 Analytics saved to: {analytics_file}")
+            except Exception as e:
+                print(f"   ⚠️ Failed to save analytics: {e}")
+            
+            # Cleanup old tracks in CV processor
+            self.cv_processor.cleanup_old_tracks()
+            
+            # Print final statistics
+            print(f"   📈 Session Summary:")
+            print(f"      - Session ID: {self.session_id}")
+            print(f"      - Frames processed: {self.frame_counter}")
+            print(f"      - Total detections: {len(self.detection_log)}")
+            print(f"      - Unique vehicles: {analytics.get('total_unique_vehicles', 0)}")
+            print(f"      - Data saved to: {self.session_dir}")
         
         # Close vision windows
         if self.vision_active:
@@ -1021,6 +1326,80 @@ class CARLADataRecorder:
         print("   🎮 Pygame cleaned up")
         
         print("✅ Cleanup complete")
+    
+    def process_video_with_enhanced_tracking(self, video_path, output_dir=None):
+        """
+        Process a video file using enhanced VehicleDetectionTracker features.
+        Args:
+            video_path (str): Path to the video file to process
+            output_dir (str): Optional output directory for results
+        """
+        if output_dir is None:
+            output_dir = os.path.join(self.data_output_dir, f"video_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        print(f"🎥 Processing video with enhanced tracking: {video_path}")
+        print(f"📁 Output directory: {output_dir}")
+        
+        # Video analysis results
+        video_results = []
+        
+        def result_callback(detection_result):
+            """Callback to handle detection results for each frame."""
+            video_results.append(detection_result)
+            
+            # Print progress every 30 frames
+            if len(video_results) % 30 == 0:
+                total_vehicles = sum(r.get("number_of_vehicles_detected", 0) for r in video_results)
+                print(f"📊 Frame {len(video_results)}: {total_vehicles} total vehicle detections so far")
+        
+        # Process the video
+        self.cv_processor.process_video(video_path, result_callback)
+        
+        # Save comprehensive results
+        results_file = os.path.join(output_dir, "video_analysis_results.json")
+        try:
+            with open(results_file, 'w') as f:
+                json.dump(video_results, f, indent=2)
+            print(f"💾 Video analysis results saved to: {results_file}")
+        except Exception as e:
+            print(f"⚠️ Failed to save video results: {e}")
+        
+        # Generate summary statistics
+        total_frames = len(video_results)
+        total_detections = sum(r.get("number_of_vehicles_detected", 0) for r in video_results)
+        unique_vehicles = set()
+        
+        for result in video_results:
+            for vehicle in result.get("detected_vehicles", []):
+                unique_vehicles.add(vehicle.get("vehicle_id"))
+        
+        summary = {
+            "video_path": video_path,
+            "total_frames_processed": total_frames,
+            "total_vehicle_detections": total_detections,
+            "unique_vehicles_tracked": len(unique_vehicles),
+            "average_detections_per_frame": total_detections / total_frames if total_frames > 0 else 0,
+            "processing_timestamp": datetime.now().isoformat()
+        }
+        
+        summary_file = os.path.join(output_dir, "video_analysis_summary.json")
+        try:
+            with open(summary_file, 'w') as f:
+                json.dump(summary, f, indent=2)
+            print(f"📊 Video summary saved to: {summary_file}")
+        except Exception as e:
+            print(f"⚠️ Failed to save video summary: {e}")
+        
+        print(f"✅ Video processing complete!")
+        print(f"   📈 Summary:")
+        print(f"      - Frames processed: {total_frames}")
+        print(f"      - Total detections: {total_detections}")
+        print(f"      - Unique vehicles: {len(unique_vehicles)}")
+        print(f"      - Avg detections/frame: {summary['average_detections_per_frame']:.2f}")
+        
+        return summary
 
 def main():
     parser = argparse.ArgumentParser(description='CARLA Data Recorder - Phase 2')
@@ -1060,3 +1439,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
